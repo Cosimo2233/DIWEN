@@ -13,26 +13,26 @@
  * ==================== DGUS 一次开发配置 (需核对) ====================
  *
  *  界面5 (游戏):
- *    音符变量图标: VP=0x2006~09  SP=0x2100/10/20/30  Y坐标=SP+4
- *    击中返回控件: VP=0x200A~0D
- *    底层转换变量图标: VP=0x2004
+ *    音符变量图标 VP: 0x2006~0x2009 (4条轨道, Y坐标值)
+ *    击中返回控件 VP: 0x200A~0x200D
+ *    底层转换变量图标 VP: 0x2004 (0=游戏, 1=成功→6, 2=失败→7)
  *
  *  界面8 (游戏关2):
- *    音符变量图标: VP=0x2010~13  SP=0x2200/10/20/30  Y坐标=SP+4
- *    击中返回控件: VP=0x2014~17
- *    底层转换变量图标: VP=0x2005
+ *    音符变量图标 VP: 0x2010~0x2013 (4条轨道, Y坐标值)
+ *    击中返回控件 VP: 0x2014~0x2017
+ *    底层转换变量图标 VP: 0x2005 (0=游戏, 1=成功→9, 2=失败→10)
  *
- *  SP起始地址(SPADDRESS): 0x5000 (见 DWprj.hmi)
- *  实际Y坐标地址 = SPADDRESS + SP + 4
- *
- *  音频控制: VP=0x200E (值1=播放音频0, 值0=停止)
+ *  ★ 采用VP地址方式写音符Y坐标 (非SP描述指针方式)
+ *    写入 VP(0x2006~0x2009 / 0x2010~0x2013) → DGUS变量图标Y坐标变化
  *
  * ==================== 界面跳转流程 (DGUS独立完成) ====================
- *  界面4 → 界面5 + 播放音频0
- *  界面6 → 界面8 + 播放音频1
- *  界面7 → 界面5 + 播放音频0
+ *  界面4 → 界面5 + 播放音频0 (DGUS按钮配置)
+ *  界面6 → 界面8 + 播放音频1 (DGUS按钮配置)
+ *  界面7 → 界面5 + 播放音频0 (DGUS按钮配置)
  *  界面9 → 界面0
  *  界面10 → 界面8 + 播放音频1
+ *
+ *  ★ 音频播放由DGUS一次开发配置完成, C代码不主动控制音频
  *
  * ==================== 界面转换 (C代码写底层VP触发) ====================
  *  VP(0x2004/0x2005) = 0 → 游戏界面  (通电默认)
@@ -54,23 +54,19 @@
 
 /*==================== 全局 VP 地址 (界面5和界面8共用) ====================*/
 #define VP_GAME_STATUS      0x2000U   /* 游戏状态 */
-#define VP_GAME_TIMER       0x2001U   /* 计时器 */
+#define VP_GAME_TIMER       0x2001U   /* 计时器 (ms) */
 #define VP_SCORE            0x2002U   /* 得分 */
-#define VP_JUDGE_RESULT     0x2003U   /* 判定反馈 */
-#define VP_CONVERT_5        0x2004U   /* 界面5底层转换变量图标 */
-#define VP_CONVERT_8        0x2005U   /* 界面8底层转换变量图标 */
-#define VP_AUDIO_CTRL       0x200EU   /* 音频控制 */
+#define VP_JUDGE_RESULT     0x2003U   /* 判定反馈 (0=无,1=击中,3=漏击) */
+#define VP_CONVERT_5        0x2004U   /* 界面5底层转换变量图标 (0=游戏,1=成功,2=失败) */
+#define VP_CONVERT_8        0x2005U   /* 界面8底层转换变量图标 (0=游戏,1=成功,2=失败) */
 
 /*
- * SP 起始地址 = SPADDRESS (见 DWprj.hmi 配置)
- * 音符Y坐标地址 = SPADDRESS + SP偏移 + 4
+ * ★ VP地址方式: 直接写变量图标VP地址更新Y坐标
+ *   页面5: 4条轨道的Y坐标分别对应 VP=0x2006~0x2009
+ *   页面8: 4条轨道的Y坐标分别对应 VP=0x2010~0x2013
  */
-#define SP_BASE             0x5000U
-
-/* 界面5 音符 SP 偏移 (每个轨道间隔0x10) */
-#define SP5_OFFSET          0x2100U
-/* 界面8 音符 SP 偏移 (每个轨道间隔0x10) */
-#define SP8_OFFSET          0x2200U
+#define NOTE5_Y_BASE        0x2006U   /* 页面5 音符Y坐标VP基址 (每条轨道+1) */
+#define NOTE8_Y_BASE        0x2010U   /* 页面8 音符Y坐标VP基址 (每条轨道+1) */
 
 /* 界面5 击中按钮 VP */
 #define HIT5_BASE           0x200AU
@@ -121,20 +117,24 @@ static unsigned int  XDATA g_note_y[TRACK_COUNT];
  * 辅助函数：根据当前游戏页面获取动态地址
  *===========================================================================*/
 
-/* 获取音符Y坐标写入地址 = SPADDRESS + SP偏移 + 4(Y坐标在SP中的位置) + 轨道*0x10 */
+/*
+ * 获取音符Y坐标VP地址
+ * 页面5: VP=0x2006 + track (0x2006~0x2009)
+ * 页面8: VP=0x2010 + track (0x2010~0x2013)
+ * 写入该VP的值即为变量图标的Y坐标
+ */
 static unsigned int get_note_y_addr(unsigned char track)
 {
-    unsigned int sp_offs;
+    unsigned int base;
     if (g_current_game == PAGE_GAME_5)
     {
-        sp_offs = SP5_OFFSET;
+        base = NOTE5_Y_BASE;
     }
     else /* PAGE_GAME_8 */
     {
-        sp_offs = SP8_OFFSET;
+        base = NOTE8_Y_BASE;
     }
-    /* SP+4 = Y坐标字段在描述指针中的偏移 */
-    return SP_BASE + sp_offs + 4U + (unsigned int)track * 0x10U;
+    return base + (unsigned int)track;
 }
 
 /* 获取击中按钮VP地址 */
@@ -188,27 +188,6 @@ static void delay_ms(unsigned int ms)
 }
 
 /*===========================================================================
- * 音频控制
- *===========================================================================*/
-
-static void audio_play(unsigned char audio_id)
-{
-    /*
-     * 写入 VP_AUDIO_CTRL，DGUS 根据值播放对应音频:
-     *   值=1 → 音频0 (游戏背景音乐)
-     *   值=2 → 音频1 (过渡音效)
-     *   值=0 → 停止
-     * 如果你 DGUS 的音频映射不同，调整这里的值即可
-     */
-    vp_write16(VP_AUDIO_CTRL, (unsigned int)audio_id + 1U);
-}
-
-static void audio_stop(void)
-{
-    vp_write16(VP_AUDIO_CTRL, 0x0000U);
-}
-
-/*===========================================================================
  * 界面切换
  *===========================================================================*/
 
@@ -245,7 +224,7 @@ static void notes_reset(void)
     for (track = 0; track < TRACK_COUNT; track++)
     {
         g_note_y[track] = NOTE_HIDDEN_Y;
-        /* 写SP+4地址来隐藏音符图标 */
+        /* 写VP地址隐藏音符图标 (Y=0) */
         vp_write16(get_note_y_addr(track), NOTE_HIDDEN_Y);
         for (note = 0; note < NOTES_PER_TRACK; note++)
         {
@@ -316,7 +295,7 @@ static void hit_buttons_reset(void)
  * 核心游戏逻辑 (每1ms)
  *===========================================================================*/
 
-/* 更新4条轨道的音符Y坐标 → 写入SP+4地址 → 屏幕上的音符往下掉 */
+/* 更新4条轨道的音符Y坐标 → 写入VP地址 → 屏幕上的音符往下掉 */
 static void game_update_notes(void)
 {
     unsigned char track, note;
@@ -352,7 +331,7 @@ static void game_update_notes(void)
                     found_active = 1U;
                 }
 
-                /* ★ 核心衔接点: 写SP+4地址 → DGUS变量图标Y坐标变化 → 屏幕刷新 */
+                /* ★ 核心衔接点: 写VP地址 → DGUS变量图标Y坐标变化 → 屏幕刷新 */
                 vp_write16(get_note_y_addr(track), g_note_y[track]);
                 break;  /* 每条轨道同时只有1个活跃音符 */
             }
@@ -444,8 +423,6 @@ static void game_end(void)
      *   =2 → DGUS自动切换为失败界面(7或10)
      */
     vp_write16(get_convert_addr(), success ? 1U : 2U);
-
-    audio_stop();
     delay_ms(300U);
 
     /* 同时代码主动跳转，双保险 */
@@ -480,9 +457,6 @@ static void game_init(unsigned char page)
     vp_write16(VP_GAME_TIMER,   0U);
     vp_write16(VP_SCORE,        0U);
     vp_write16(VP_JUDGE_RESULT, JUDGE_NONE);
-
-    /* 播放游戏音乐 (音频0) */
-    audio_play(0U);
 }
 
 /*===========================================================================
@@ -532,11 +506,10 @@ static void page_change_handler(void)
     }
     else
     {
-        /* 离开游戏界面 → 清理 */
+        /* 离开游戏界面 → 清理状态 */
         if (g_game_status == STATUS_PLAYING)
         {
             g_game_status = STATUS_IDLE;
-            audio_stop();
             convert_reset();
         }
     }
