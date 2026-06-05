@@ -1,0 +1,617 @@
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN ..\OBJ\main.obj
+COMPILER INVOKED BY: D:\Keil5\C51\BIN\C51.EXE main.c LARGE OMF2 OPTIMIZE(3,SIZE) BROWSE INCDIR(..\USER;..\FUNC_HANDLER;.
+                    -.\GUI_APP) DEBUG PRINT(..\OBJ\main.lst) TABS(2) OBJECT(..\OBJ\main.obj)
+
+line level    source
+
+   1          #include "sys.h"
+   2          
+   3          /* 兼容 VSCode IntelliSense (不识别 Keil C51 的 xdata 关键字) */
+   4          #ifdef __C51__
+   5          #define XDATA xdata
+   6          #else
+              #define XDATA
+              #endif
+   9          
+  10          /*===========================================================================
+  11           * 节奏大师 - 迪文屏二次开发 (T5L OS 8051)
+  12           *
+  13           * ==================== DGUS 一次开发配置 (需核对) ====================
+  14           *
+  15           *  界面5 (游戏):
+  16           *    音符变量图标: VP=0x2006~09  SP=0x2100/10/20/30  Y坐标=SP+4
+  17           *    击中返回控件: VP=0x200A~0D
+  18           *    底层转换变量图标: VP=0x2004
+  19           *
+  20           *  界面8 (游戏关2):
+  21           *    音符变量图标: VP=0x2010~13  SP=0x2200/10/20/30  Y坐标=SP+4
+  22           *    击中返回控件: VP=0x2014~17
+  23           *    底层转换变量图标: VP=0x2005
+  24           *
+  25           *  SP起始地址(SPADDRESS): 0x5000 (见 DWprj.hmi)
+  26           *  实际Y坐标地址 = SPADDRESS + SP + 4
+  27           *
+  28           *  音频控制: VP=0x200E (值1=播放音频0, 值0=停止)
+  29           *
+  30           * ==================== 界面跳转流程 (DGUS独立完成) ====================
+  31           *  界面4 → 界面5 + 播放音频0
+  32           *  界面6 → 界面8 + 播放音频1
+  33           *  界面7 → 界面5 + 播放音频0
+  34           *  界面9 → 界面0
+  35           *  界面10 → 界面8 + 播放音频1
+  36           *
+  37           * ==================== 界面转换 (C代码写底层VP触发) ====================
+  38           *  VP(0x2004/0x2005) = 0 → 游戏界面  (通电默认)
+  39           *  VP(0x2004/0x2005) = 1 → 成功界面6/9
+  40           *  VP(0x2004/0x2005) = 2 → 失败界面7/10
+  41           *===========================================================================*/
+  42          
+  43          /*==================== 界面编号 ====================*/
+  44          #define PAGE_GAME_5         5U
+  45          #define PAGE_SUCCESS_6      6U
+  46          #define PAGE_FAIL_7         7U
+  47          #define PAGE_GAME_8         8U
+  48          #define PAGE_SUCCESS_9      9U
+  49          #define PAGE_FAIL_10        10U
+  50          
+  51          /*==================== DGUS 系统 VP 地址 ====================*/
+  52          #define VP_PAGE_ID          0x0014U   /* 当前界面编号 (只读) */
+  53          #define VP_PAGE_SWITCH      0x0084U   /* 界面切换命令 (只写) */
+  54          
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 2   
+
+  55          /*==================== 全局 VP 地址 (界面5和界面8共用) ====================*/
+  56          #define VP_GAME_STATUS      0x2000U   /* 游戏状态 */
+  57          #define VP_GAME_TIMER       0x2001U   /* 计时器 */
+  58          #define VP_SCORE            0x2002U   /* 得分 */
+  59          #define VP_JUDGE_RESULT     0x2003U   /* 判定反馈 */
+  60          #define VP_CONVERT_5        0x2004U   /* 界面5底层转换变量图标 */
+  61          #define VP_CONVERT_8        0x2005U   /* 界面8底层转换变量图标 */
+  62          #define VP_AUDIO_CTRL       0x200EU   /* 音频控制 */
+  63          
+  64          /*
+  65           * SP 起始地址 = SPADDRESS (见 DWprj.hmi 配置)
+  66           * 音符Y坐标地址 = SPADDRESS + SP偏移 + 4
+  67           */
+  68          #define SP_BASE             0x5000U
+  69          
+  70          /* 界面5 音符 SP 偏移 (每个轨道间隔0x10) */
+  71          #define SP5_OFFSET          0x2100U
+  72          /* 界面8 音符 SP 偏移 (每个轨道间隔0x10) */
+  73          #define SP8_OFFSET          0x2200U
+  74          
+  75          /* 界面5 击中按钮 VP */
+  76          #define HIT5_BASE           0x200AU
+  77          /* 界面8 击中按钮 VP */
+  78          #define HIT8_BASE           0x2014U
+  79          
+  80          /*==================== 游戏参数 ====================*/
+  81          #define TRACK_COUNT         4U
+  82          #define NOTES_PER_TRACK     15U
+  83          #define TOTAL_NOTES         (TRACK_COUNT * NOTES_PER_TRACK)
+  84          #define SUCCESS_THRESHOLD   60U
+  85          
+  86          #define NOTE_START_Y        20U
+  87          #define NOTE_END_Y          220U
+  88          #define HIT_Y_MIN           200U
+  89          #define HIT_Y_MAX           235U
+  90          #define NOTE_HIDDEN_Y       0U
+  91          #define FALL_DIV            10U
+  92          
+  93          #define MUSIC_LEN_MS        34000U
+  94          
+  95          /*==================== 状态常量 ====================*/
+  96          #define STATUS_IDLE         0U
+  97          #define STATUS_PLAYING      1U
+  98          #define STATUS_ENDED        2U
+  99          
+ 100          #define JUDGE_NONE          0U
+ 101          #define JUDGE_HIT           1U
+ 102          #define JUDGE_MISS          3U
+ 103          
+ 104          #define NOTE_PENDING        0U
+ 105          #define NOTE_FALLING        1U
+ 106          #define NOTE_DONE           2U
+ 107          
+ 108          /*==================== 全局变量 ====================*/
+ 109          static unsigned int  g_timer;
+ 110          static unsigned int  g_hit_count;
+ 111          static unsigned char g_last_page;
+ 112          static unsigned char g_game_status;
+ 113          static unsigned char g_current_game;   /* 当前游戏界面: PAGE_GAME_5 或 PAGE_GAME_8 */
+ 114          
+ 115          /* 大数组放 xdata (T5L 内部DATA仅256B) */
+ 116          static unsigned int  XDATA g_note_start[TRACK_COUNT][NOTES_PER_TRACK];
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 3   
+
+ 117          static unsigned char XDATA g_note_state[TRACK_COUNT][NOTES_PER_TRACK];
+ 118          static unsigned int  XDATA g_note_y[TRACK_COUNT];
+ 119          
+ 120          /*===========================================================================
+ 121           * 辅助函数：根据当前游戏页面获取动态地址
+ 122           *===========================================================================*/
+ 123          
+ 124          /* 获取音符Y坐标写入地址 = SPADDRESS + SP偏移 + 4(Y坐标在SP中的位置) + 轨道*0x10 */
+ 125          static unsigned int get_note_y_addr(unsigned char track)
+ 126          {
+ 127   1          unsigned int sp_offs;
+ 128   1          if (g_current_game == PAGE_GAME_5)
+ 129   1          {
+ 130   2              sp_offs = SP5_OFFSET;
+ 131   2          }
+ 132   1          else /* PAGE_GAME_8 */
+ 133   1          {
+ 134   2              sp_offs = SP8_OFFSET;
+ 135   2          }
+ 136   1          /* SP+4 = Y坐标字段在描述指针中的偏移 */
+ 137   1          return SP_BASE + sp_offs + 4U + (unsigned int)track * 0x10U;
+ 138   1      }
+ 139          
+ 140          /* 获取击中按钮VP地址 */
+ 141          static unsigned int get_hit_btn_addr(unsigned char track)
+ 142          {
+ 143   1          unsigned int base;
+ 144   1          if (g_current_game == PAGE_GAME_5)
+ 145   1          {
+ 146   2              base = HIT5_BASE;
+ 147   2          }
+ 148   1          else /* PAGE_GAME_8 */
+ 149   1          {
+ 150   2              base = HIT8_BASE;
+ 151   2          }
+ 152   1          return base + (unsigned int)track;
+ 153   1      }
+ 154          
+ 155          /* 获取底层转换变量VP地址 */
+ 156          static unsigned int get_convert_addr(void)
+ 157          {
+ 158   1          return (g_current_game == PAGE_GAME_5) ? VP_CONVERT_5 : VP_CONVERT_8;
+ 159   1      }
+ 160          
+ 161          /*===========================================================================
+ 162           * VP 读写封装
+ 163           *===========================================================================*/
+ 164          
+ 165          static void vp_write16(unsigned int addr, unsigned int val)
+ 166          {
+ 167   1          unsigned char buf[2];
+ 168   1          buf[0] = (unsigned char)(val >> 8);
+ 169   1          buf[1] = (unsigned char)(val & 0xFF);
+ 170   1          sys_write_vp(addr, buf, 2);
+ 171   1      }
+ 172          
+ 173          static unsigned int vp_read16(unsigned int addr)
+ 174          {
+ 175   1          unsigned char buf[2];
+ 176   1          sys_read_vp(addr, buf, 2);
+ 177   1          return ((unsigned int)buf[0] << 8) | buf[1];
+ 178   1      }
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 4   
+
+ 179          
+ 180          static void vp_write8(unsigned int addr, unsigned char val)
+ 181          {
+ 182   1          sys_write_vp(addr, &val, 1);
+ 183   1      }
+ 184          
+ 185          static void delay_ms(unsigned int ms)
+ 186          {
+ 187   1          sys_delay_ms(ms);
+ 188   1      }
+ 189          
+ 190          /*===========================================================================
+ 191           * 音频控制
+ 192           *===========================================================================*/
+ 193          
+ 194          static void audio_play(unsigned char audio_id)
+ 195          {
+ 196   1          /*
+ 197   1           * 写入 VP_AUDIO_CTRL，DGUS 根据值播放对应音频:
+ 198   1           *   值=1 → 音频0 (游戏背景音乐)
+ 199   1           *   值=2 → 音频1 (过渡音效)
+ 200   1           *   值=0 → 停止
+ 201   1           * 如果你 DGUS 的音频映射不同，调整这里的值即可
+ 202   1           */
+ 203   1          vp_write16(VP_AUDIO_CTRL, (unsigned int)audio_id + 1U);
+ 204   1      }
+ 205          
+ 206          static void audio_stop(void)
+ 207          {
+ 208   1          vp_write16(VP_AUDIO_CTRL, 0x0000U);
+ 209   1      }
+ 210          
+ 211          /*===========================================================================
+ 212           * 界面切换
+ 213           *===========================================================================*/
+ 214          
+ 215          static void page_switch(unsigned char page_id)
+ 216          {
+ 217   1          vp_write8(VP_PAGE_SWITCH, page_id);
+ 218   1      }
+ 219          
+ 220          static unsigned char page_get_current(void)
+ 221          {
+ 222   1          unsigned char buf[1];
+ 223   1          sys_read_vp(VP_PAGE_ID, buf, 1);
+ 224   1          return buf[0];
+ 225   1      }
+ 226          
+ 227          /*===========================================================================
+ 228           * 界面转换变量管理
+ 229           *===========================================================================*/
+ 230          
+ 231          static void convert_reset(void)
+ 232          {
+ 233   1          /* 通电时确保两个底层变量都为0 (显示游戏界面) */
+ 234   1          vp_write16(VP_CONVERT_5, 0U);
+ 235   1          vp_write16(VP_CONVERT_8, 0U);
+ 236   1      }
+ 237          
+ 238          /*===========================================================================
+ 239           * 音符管理
+ 240           *===========================================================================*/
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 5   
+
+ 241          
+ 242          static void notes_reset(void)
+ 243          {
+ 244   1          unsigned char track, note;
+ 245   1          for (track = 0; track < TRACK_COUNT; track++)
+ 246   1          {
+ 247   2              g_note_y[track] = NOTE_HIDDEN_Y;
+ 248   2              /* 写SP+4地址来隐藏音符图标 */
+ 249   2              vp_write16(get_note_y_addr(track), NOTE_HIDDEN_Y);
+ 250   2              for (note = 0; note < NOTES_PER_TRACK; note++)
+ 251   2              {
+ 252   3                  g_note_state[track][note] = NOTE_PENDING;
+ 253   3                  g_note_start[track][note] = 0U;
+ 254   3              }
+ 255   2          }
+ 256   1      }
+ 257          
+ 258          /*
+ 259           * 生成不规则音符掉落时间表
+ 260           * 每条轨道15个音符，在34000ms音乐结束前全部掉落完毕
+ 261           * 使用多种扰动因子确保4条轨道音符不会整齐划一地下落
+ 262           */
+ 263          static void notes_build_schedule(void)
+ 264          {
+ 265   1          unsigned char track, note;
+ 266   1          unsigned int interval;
+ 267   1          unsigned int start_time;
+ 268   1      
+ 269   1          interval = MUSIC_LEN_MS / NOTES_PER_TRACK;  /* ~2266ms */
+ 270   1      
+ 271   1          for (track = 0; track < TRACK_COUNT; track++)
+ 272   1          {
+ 273   2              unsigned int offset = (unsigned int)track * 500U;
+ 274   2      
+ 275   2              for (note = 0; note < NOTES_PER_TRACK; note++)
+ 276   2              {
+ 277   3                  start_time = 800U
+ 278   3                             + (unsigned int)note * interval
+ 279   3                             + offset
+ 280   3                             + (unsigned int)(note % 3U) * 150U
+ 281   3                             + (unsigned int)((note * 37U) % 200U);
+ 282   3      
+ 283   3                  /* 确保最后一个音符在音乐结束前掉落完 */
+ 284   3                  if (start_time > MUSIC_LEN_MS - 2500U)
+ 285   3                  {
+ 286   4                      start_time = MUSIC_LEN_MS - 2500U
+ 287   4                                 - (unsigned int)(NOTES_PER_TRACK - note) * 100U;
+ 288   4                  }
+ 289   3      
+ 290   3                  /* 避免负数/过小值 */
+ 291   3                  if (start_time < 100U)
+ 292   3                  {
+ 293   4                      start_time = 100U + note * 80U;
+ 294   4                  }
+ 295   3      
+ 296   3                  g_note_start[track][note] = start_time;
+ 297   3                  g_note_state[track][note] = NOTE_PENDING;
+ 298   3              }
+ 299   2          }
+ 300   1      }
+ 301          
+ 302          /*===========================================================================
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 6   
+
+ 303           * 击中按钮管理
+ 304           *===========================================================================*/
+ 305          
+ 306          static void hit_buttons_reset(void)
+ 307          {
+ 308   1          unsigned char track;
+ 309   1          for (track = 0; track < TRACK_COUNT; track++)
+ 310   1          {
+ 311   2              vp_write16(get_hit_btn_addr(track), 0U);
+ 312   2          }
+ 313   1      }
+ 314          
+ 315          /*===========================================================================
+ 316           * 核心游戏逻辑 (每1ms)
+ 317           *===========================================================================*/
+ 318          
+ 319          /* 更新4条轨道的音符Y坐标 → 写入SP+4地址 → 屏幕上的音符往下掉 */
+ 320          static void game_update_notes(void)
+ 321          {
+ 322   1          unsigned char track, note;
+ 323   1      
+ 324   1          for (track = 0; track < TRACK_COUNT; track++)
+ 325   1          {
+ 326   2              unsigned char found_active = 0U;
+ 327   2      
+ 328   2              for (note = 0; note < NOTES_PER_TRACK; note++)
+ 329   2              {
+ 330   3                  /* 激活到达预定时间的音符 */
+ 331   3                  if (g_note_state[track][note] == NOTE_PENDING
+ 332   3                      && g_timer >= g_note_start[track][note])
+ 333   3                  {
+ 334   4                      g_note_state[track][note] = NOTE_FALLING;
+ 335   4                  }
+ 336   3      
+ 337   3                  /* 处理正在下落的音符 */
+ 338   3                  if (g_note_state[track][note] == NOTE_FALLING)
+ 339   3                  {
+ 340   4                      unsigned int elapsed = g_timer - g_note_start[track][note];
+ 341   4                      unsigned int y = NOTE_START_Y + elapsed / FALL_DIV;
+ 342   4      
+ 343   4                      if (y >= NOTE_END_Y)
+ 344   4                      {
+ 345   5                          /* 超出底部 → 漏掉 */
+ 346   5                          g_note_state[track][note] = NOTE_DONE;
+ 347   5                          g_note_y[track] = NOTE_HIDDEN_Y;
+ 348   5                      }
+ 349   4                      else
+ 350   4                      {
+ 351   5                          g_note_y[track] = y;
+ 352   5                          found_active = 1U;
+ 353   5                      }
+ 354   4      
+ 355   4                      /* ★ 核心衔接点: 写SP+4地址 → DGUS变量图标Y坐标变化 → 屏幕刷新 *
+             -/
+ 356   4                      vp_write16(get_note_y_addr(track), g_note_y[track]);
+ 357   4                      break;  /* 每条轨道同时只有1个活跃音符 */
+ 358   4                  }
+ 359   3              }
+ 360   2      
+ 361   2              if (found_active == 0U)
+ 362   2              {
+ 363   3                  vp_write16(get_note_y_addr(track), NOTE_HIDDEN_Y);
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 7   
+
+ 364   3              }
+ 365   2          }
+ 366   1      }
+ 367          
+ 368          /* 检测击中: 读底部4个返回控件VP → 判断Y坐标是否在命中区 */
+ 369          static void game_check_hits(void)
+ 370          {
+ 371   1          unsigned char track, note;
+ 372   1          unsigned int btn_val;
+ 373   1      
+ 374   1          for (track = 0; track < TRACK_COUNT; track++)
+ 375   1          {
+ 376   2              btn_val = vp_read16(get_hit_btn_addr(track));
+ 377   2      
+ 378   2              if (btn_val == 0U)
+ 379   2              {
+ 380   3                  continue;
+ 381   3              }
+ 382   2      
+ 383   2              /* 按钮被按下 */
+ 384   2              {
+ 385   3                  unsigned char hit_handled = 0U;
+ 386   3      
+ 387   3                  for (note = 0; note < NOTES_PER_TRACK; note++)
+ 388   3                  {
+ 389   4                      if (g_note_state[track][note] == NOTE_FALLING)
+ 390   4                      {
+ 391   5                          if (g_note_y[track] >= HIT_Y_MIN && g_note_y[track] <= HIT_Y_MAX)
+ 392   5                          {
+ 393   6                              /* ★ 命中! */
+ 394   6                              g_hit_count++;
+ 395   6                              g_note_state[track][note] = NOTE_DONE;
+ 396   6                              g_note_y[track] = NOTE_HIDDEN_Y;
+ 397   6                              vp_write16(get_note_y_addr(track), NOTE_HIDDEN_Y);
+ 398   6                              vp_write16(VP_JUDGE_RESULT, JUDGE_HIT);
+ 399   6                          }
+ 400   5                          else
+ 401   5                          {
+ 402   6                              /* 时机不对 → 失误 */
+ 403   6                              vp_write16(VP_JUDGE_RESULT, JUDGE_MISS);
+ 404   6                          }
+ 405   5                          hit_handled = 1U;
+ 406   5                          break;
+ 407   5                      }
+ 408   4                  }
+ 409   3      
+ 410   3                  if (hit_handled == 0U)
+ 411   3                  {
+ 412   4                      /* 无活跃音符时误触 */
+ 413   4                      vp_write16(VP_JUDGE_RESULT, JUDGE_MISS);
+ 414   4                  }
+ 415   3              }
+ 416   2      
+ 417   2              /* 清空按钮状态，等待下次按下 */
+ 418   2              vp_write16(get_hit_btn_addr(track), 0U);
+ 419   2          }
+ 420   1      }
+ 421          
+ 422          /* 判断通关: 击中数 / 总数 >= 60% */
+ 423          static unsigned char game_is_success(void)
+ 424          {
+ 425   1          unsigned int percent;
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 8   
+
+ 426   1          percent = (g_hit_count * 100U) / TOTAL_NOTES;
+ 427   1          return (percent >= SUCCESS_THRESHOLD) ? 1U : 0U;
+ 428   1      }
+ 429          
+ 430          /* 游戏结束: 统计结果 → 写底层变量图标触发界面转换 → 跳转成功/失败页 */
+ 431          static void game_end(void)
+ 432          {
+ 433   1          unsigned char success;
+ 434   1          unsigned char target_page;
+ 435   1      
+ 436   1          g_game_status = STATUS_ENDED;
+ 437   1          vp_write16(VP_GAME_STATUS, STATUS_ENDED);
+ 438   1      
+ 439   1          success = game_is_success();
+ 440   1      
+ 441   1          /*
+ 442   1           * ★ 核心衔接点: 修改底层变量图标的VP值
+ 443   1           *   =1 → DGUS自动切换为成功界面(6或9)
+ 444   1           *   =2 → DGUS自动切换为失败界面(7或10)
+ 445   1           */
+ 446   1          vp_write16(get_convert_addr(), success ? 1U : 2U);
+ 447   1      
+ 448   1          audio_stop();
+ 449   1          delay_ms(300U);
+ 450   1      
+ 451   1          /* 同时代码主动跳转，双保险 */
+ 452   1          if (g_current_game == PAGE_GAME_5)
+ 453   1          {
+ 454   2              target_page = success ? PAGE_SUCCESS_6 : PAGE_FAIL_7;
+ 455   2          }
+ 456   1          else
+ 457   1          {
+ 458   2              target_page = success ? PAGE_SUCCESS_9 : PAGE_FAIL_10;
+ 459   2          }
+ 460   1          page_switch(target_page);
+ 461   1      }
+ 462          
+ 463          /*===========================================================================
+ 464           * 游戏初始化 (进入界面5或8时调用)
+ 465           *===========================================================================*/
+ 466          
+ 467          static void game_init(unsigned char page)
+ 468          {
+ 469   1          g_current_game = page;
+ 470   1          g_timer        = 0U;
+ 471   1          g_hit_count    = 0U;
+ 472   1          g_game_status  = STATUS_PLAYING;
+ 473   1      
+ 474   1          convert_reset();
+ 475   1          notes_reset();
+ 476   1          notes_build_schedule();
+ 477   1          hit_buttons_reset();
+ 478   1      
+ 479   1          vp_write16(VP_GAME_STATUS,  STATUS_PLAYING);
+ 480   1          vp_write16(VP_GAME_TIMER,   0U);
+ 481   1          vp_write16(VP_SCORE,        0U);
+ 482   1          vp_write16(VP_JUDGE_RESULT, JUDGE_NONE);
+ 483   1      
+ 484   1          /* 播放游戏音乐 (音频0) */
+ 485   1          audio_play(0U);
+ 486   1      }
+ 487          
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 9   
+
+ 488          /*===========================================================================
+ 489           * 游戏主循环
+ 490           *===========================================================================*/
+ 491          
+ 492          static void game_loop(void)
+ 493          {
+ 494   1          if (g_game_status != STATUS_PLAYING)
+ 495   1          {
+ 496   2              return;
+ 497   2          }
+ 498   1      
+ 499   1          g_timer++;
+ 500   1          vp_write16(VP_GAME_TIMER, g_timer);
+ 501   1      
+ 502   1          game_update_notes();    /* 更新4轨道音符Y坐标 */
+ 503   1          game_check_hits();      /* 检测击打 */
+ 504   1      
+ 505   1          if (g_timer >= MUSIC_LEN_MS)
+ 506   1          {
+ 507   2              game_end();
+ 508   2          }
+ 509   1      }
+ 510          
+ 511          /*===========================================================================
+ 512           * 界面切换检测
+ 513           *===========================================================================*/
+ 514          
+ 515          static void page_change_handler(void)
+ 516          {
+ 517   1          unsigned char now_page;
+ 518   1      
+ 519   1          now_page = page_get_current();
+ 520   1      
+ 521   1          if (now_page == g_last_page)
+ 522   1          {
+ 523   2              return;
+ 524   2          }
+ 525   1      
+ 526   1          g_last_page = now_page;
+ 527   1      
+ 528   1          if (now_page == PAGE_GAME_5 || now_page == PAGE_GAME_8)
+ 529   1          {
+ 530   2              /* 进入游戏界面 → 初始化新游戏 */
+ 531   2              game_init(now_page);
+ 532   2          }
+ 533   1          else
+ 534   1          {
+ 535   2              /* 离开游戏界面 → 清理 */
+ 536   2              if (g_game_status == STATUS_PLAYING)
+ 537   2              {
+ 538   3                  g_game_status = STATUS_IDLE;
+ 539   3                  audio_stop();
+ 540   3                  convert_reset();
+ 541   3              }
+ 542   2          }
+ 543   1      }
+ 544          
+ 545          /*===========================================================================
+ 546           * 主函数
+ 547           *===========================================================================*/
+ 548          
+ 549          void main(void)
+C51 COMPILER V9.54   MAIN                                                                  06/05/2026 19:17:46 PAGE 10  
+
+ 550          {
+ 551   1          sys_init();
+ 552   1      
+ 553   1          g_timer         = 0U;
+ 554   1          g_hit_count     = 0U;
+ 555   1          g_game_status   = STATUS_IDLE;
+ 556   1          g_last_page     = 0xFFU;       /* 强制首次界面检测 */
+ 557   1          g_current_game  = PAGE_GAME_5;
+ 558   1      
+ 559   1          /* 通电时确保底层变量为0 → 显示游戏界面(非成功/失败) */
+ 560   1          convert_reset();
+ 561   1      
+ 562   1          delay_ms(50U);
+ 563   1      
+ 564   1          while (1)
+ 565   1          {
+ 566   2              page_change_handler();  /* 检测界面切换 */
+ 567   2              game_loop();            /* 运行游戏逻辑 */
+ 568   2              delay_ms(1U);           /* 1ms 循环周期 */
+ 569   2          }
+ 570   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   2106    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =    195      53
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+   EDATA SIZE       =   ----    ----
+   HDATA SIZE       =   ----    ----
+   XDATA CONST SIZE =   ----    ----
+   FAR CONST SIZE   =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
